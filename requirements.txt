@@ -1,4 +1,4 @@
 python-telegram-bot==20.8
 Flask
-googletrans==4.0.0-rc1
 langdetect
+deep-translator==1.11.4
