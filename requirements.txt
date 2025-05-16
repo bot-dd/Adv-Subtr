@@ -1,4 +1,5 @@
 python-telegram-bot==20.8
-Flask
-googletrans==4.0.0-rc1
+deep-translator
 langdetect
+Flask
+aiofiles
