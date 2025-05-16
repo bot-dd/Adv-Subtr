@@ -1,111 +1,112 @@
 import os
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from langdetect import detect
-from deep_translator import GoogleTranslator
 from flask import Flask
-import threading
-
-# Logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
 )
+from langdetect import detect
+from googletrans import Translator
 
-TOKEN = os.getenv("BOT_TOKEN", "7560563197:AAHmmIygYMElUtUPnYc2Iu05v5y1KOTWpnY")
-
+# ========== Configuration ==========
+TOKEN = os.environ.get("BOT_TOKEN", "your_bot_token_here")
 LANGUAGES = {
-    'bn': 'বাংলা', 'en': 'English', 'hi': 'हिन्दी', 'es': 'Español',
-    'fr': 'Français', 'de': 'Deutsch', 'ru': 'Русский', 'ar': 'العربية',
-    'zh-cn': '中文', 'pt': 'Português', 'ja': '日本語', 'ko': '한국어', 'tr': 'Türkçe'
+    "en": "English", "bn": "Bengali", "hi": "Hindi",
+    "ta": "Tamil", "te": "Telugu", "ml": "Malayalam",
+    "ar": "Arabic"
 }
-
-# Start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [
-        [InlineKeyboardButton("Join Channel", url="https://t.me/RM_Movie_Flix")],
-        [InlineKeyboardButton("Developer", url="https://t.me/RahatMx")],
-    ]
-    await update.message.reply_text(
-        "Welcome to the Advanced Subtitle Translator Bot!\n\n"
-        "Send me any `.srt`, `.vtt`, or `.ass` subtitle file and I’ll translate it.",
-        reply_markup=InlineKeyboardMarkup(kb)
-    )
-
-# Handle subtitle files
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if not doc.file_name.endswith(('.srt', '.vtt', '.ass')):
-        await update.message.reply_text("Only `.srt`, `.vtt`, `.ass` files are supported.")
-        return
-
-    file_path = f"downloads/{doc.file_name}"
-    os.makedirs("downloads", exist_ok=True)
-    await doc.get_file().download_to_drive(file_path)
-    context.user_data['file'] = file_path
-    context.user_data['file_name'] = doc.file_name
-
-    buttons = [
-        [InlineKeyboardButton(v + f" ({k})", callback_data=k)] for k, v in LANGUAGES.items()
-    ]
-    await update.message.reply_text(
-        "Select the target language to translate your subtitle:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-
-# Translate on language selection
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    target_lang = query.data
-    file_path = context.user_data.get('file')
-
-    if not file_path:
-        await query.edit_message_text("No file found.")
-        return
-
-    translated_lines = []
-    with open(file_path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-        for line in lines:
-            try:
-                if line.strip() and not line[0].isdigit() and "-->" not in line:
-                    translated = GoogleTranslator(source='auto', target=target_lang).translate(line.strip())
-                    translated_lines.append(translated + "\n")
-                else:
-                    translated_lines.append(line)
-            except Exception as e:
-                translated_lines.append(line)
-
-    new_filename = f"{os.path.splitext(context.user_data['file_name'])[0]}_translated_{target_lang}.srt"
-    new_path = f"downloads/{new_filename}"
-    with open(new_path, 'w', encoding='utf-8') as f:
-        f.writelines(translated_lines)
-
-    await query.message.reply_document(document=open(new_path, 'rb'), filename=new_filename,
-        caption=f"Translated to {LANGUAGES.get(target_lang)} ({target_lang})")
-    
-    os.remove(file_path)
-    os.remove(new_path)
-    context.user_data.clear()
-
-# Run Flask for uptime
+SUPPORTED_EXTS = ["srt", "ass", "vtt", "sub"]
+translator = Translator()
 app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return 'Subtitle Bot is Alive!'
+# ========== Flask Web ==========
+@app.route("/")
+def index():
+    return "Bot is running!"
 
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
+# ========== Bot Commands ==========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Welcome to Subtitle Translator Bot!\nJust send me a `.srt`, `.ass`, `.vtt`, or `.sub` subtitle file.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Help", callback_data="help"),
+             InlineKeyboardButton("About", callback_data="about")]
+        ])
+    )
 
-if __name__ == '__main__':
-    threading.Thread(target=run_flask).start()
-    app_tg = ApplicationBuilder().token(TOKEN).build()
-    app_tg.add_handler(CommandHandler("start", start))
-    app_tg.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    app_tg.add_handler(CallbackQueryHandler(button))
-    print("Bot running...")
-    app_tg.run_polling()
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Upload a subtitle file. Then choose a language. You'll get the translated subtitle back.")
+
+async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Subtitle Translator Bot\nCreated by @RahatMx\nPowered by RM Movie Flix")
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data in LANGUAGES:
+        file_id = context.user_data.get("file_id")
+        ext = context.user_data.get("file_ext")
+        lang = data
+
+        file = await context.bot.get_file(file_id)
+        path = await file.download_to_drive()
+
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        output = []
+        for line in lines:
+            if line.strip() and not line.strip().isdigit() and "-->" not in line:
+                try:
+                    src_lang = detect(line)
+                    translated = translator.translate(line.strip(), src=src_lang, dest=lang).text
+                    output.append(translated + "\n")
+                except Exception:
+                    output.append(line)
+            else:
+                output.append(line)
+
+        out_file = f"translated_{LANGUAGES[lang]}.{ext}"
+        with open(out_file, "w", encoding="utf-8") as f:
+            f.writelines(output)
+
+        await query.message.reply_document(
+            document=open(out_file, "rb"),
+            filename=out_file,
+            caption=f"Translated to {LANGUAGES[lang]}"
+        )
+    elif data == "help":
+        await query.edit_message_text("Send a subtitle file and choose the language you want it translated to.")
+    elif data == "about":
+        await query.edit_message_text("Created by @RahatMx | Powered by RM Movie Flix")
+
+# ========== Subtitle Upload ==========
+async def handle_subtitle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = update.message.document
+    ext = file.file_name.split(".")[-1].lower()
+    if ext not in SUPPORTED_EXTS:
+        await update.message.reply_text("Unsupported file format. Please send a valid subtitle file (srt, ass, vtt, sub).")
+        return
+
+    context.user_data["file_id"] = file.file_id
+    context.user_data["file_ext"] = ext
+
+    buttons = [[InlineKeyboardButton(name, callback_data=code)] for code, name in LANGUAGES.items()]
+    await update.message.reply_text("Choose a language to translate to:", reply_markup=InlineKeyboardMarkup(buttons))
+
+# ========== Run App ==========
+def main():
+    tg_app = ApplicationBuilder().token(TOKEN).build()
+
+    tg_app.add_handler(CommandHandler("start", start))
+    tg_app.add_handler(CommandHandler("help", help_command))
+    tg_app.add_handler(CommandHandler("about", about))
+    tg_app.add_handler(MessageHandler(filters.Document.ALL, handle_subtitle))
+    tg_app.add_handler(CallbackQueryHandler(button_handler))
+
+    tg_app.run_polling()
+
+if __name__ == "__main__":
+    main()
