@@ -1,110 +1,122 @@
 import os
-import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+import uuid
+import aiofiles
+import logging
+from telegram import (
+    Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
+)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
 )
 from deep_translator import GoogleTranslator
-from langdetect import detect
-from flask import Flask
-import threading
-import aiofiles
 
-# Config
-TOKEN = os.getenv("BOT_TOKEN", "7560563197:AAHmmIygYMElUtUPnYc2Iu05v5y1KOTWpnY")
-PORT = int(os.environ.get("PORT", 5000))
-SUPPORTED_EXTENSIONS = ['.srt', '.vtt', '.ass', '.sub']
+# Setup Logging
+logging.basicConfig(level=logging.INFO)
 
-# Flask App
-app = Flask(__name__)
+# Paths & Memory
+os.makedirs("temp", exist_ok=True)
+user_data = {}
+SUPPORTED_FORMATS = ['.srt', '.vtt', '.ass', '.sub', '.txt']
 
-@app.route('/')
-def index():
-    return "Subtitle Bot Running - Created by Rahat"
+LANGUAGES = {
+    "en": "🇺🇸 English", "bn": "🇧🇩 Bangla", "hi": "🇮🇳 Hindi",
+    "fr": "🇫🇷 French", "ar": "🇸🇦 Arabic", "es": "🇪🇸 Spanish",
+    "ru": "🇷🇺 Russian", "zh": "🇨🇳 Chinese"
+}
 
-def start_flask():
-    app.run(host="0.0.0.0", port=PORT)
-
-# Start Command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Send a subtitle file (SRT/VTT/ASS/SUB/TXT) to translate.")
+
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    file_name = doc.file_name
+    file_ext = os.path.splitext(file_name)[1].lower()
+
+    if file_ext not in SUPPORTED_FORMATS:
+        await update.message.reply_text("Unsupported format! Supported: SRT, VTT, ASS, SUB, TXT")
+        return
+
+    uid = str(uuid.uuid4())
+    file_path = f"temp/{uid}_{file_name}"
+    await doc.get_file().download_to_drive(file_path)
+
+    user_data[update.effective_chat.id] = {
+        "file": file_path,
+        "ext": file_ext,
+        "name": file_name
+    }
+
+    # Language Buttons
+    buttons = [[InlineKeyboardButton(name, callback_data=f"lang_{code}")]
+               for code, name in LANGUAGES.items()]
     await update.message.reply_text(
-        "**Welcome to Subtitle Translator Bot!**\n\nSend a subtitle file (.srt, .vtt, .ass, .sub) and I'll translate it automatically.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Developer", url="https://t.me/RahatMx")],
-            [InlineKeyboardButton("Main Channel", url="https://t.me/RM_Movie_Flix")]
-        ])
+        "Choose target language:",
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-# Subtitle Translator
-async def handle_subtitle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    filename = doc.file_name.lower()
-    file_ext = os.path.splitext(filename)[1]
+async def handle_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    user = user_data.get(chat_id)
 
-    if file_ext not in SUPPORTED_EXTENSIONS:
-        await update.message.reply_text("Unsupported file format! Use: `.srt`, `.vtt`, `.ass`, `.sub`")
+    if not user:
+        await query.edit_message_text("Please send a subtitle file again.")
         return
 
-    await update.message.reply_text("Downloading and translating subtitle...")
+    lang_code = query.data.split("_")[1]
+    await query.edit_message_text(f"Translating to {LANGUAGES[lang_code]}...")
 
-    file_path = f"temp/{filename}"
-    os.makedirs("temp", exist_ok=True)
+    # Read original file
+    async with aiofiles.open(user["file"], "r", encoding="utf-8", errors="ignore") as f:
+        original = await f.readlines()
 
-    file = await context.bot.get_file(doc.file_id)
-    await file.download_to_drive(file_path)
+    total = len(original)
+    translated = []
+    progress_msg = await context.bot.send_message(chat_id=chat_id, text="Progress: 0%")
 
-    try:
-        async with aiofiles.open(file_path, mode="r", encoding="utf-8", errors="ignore") as f:
-            content = await f.read()
-    except Exception as e:
-        await update.message.reply_text(f"Error reading file: {e}")
-        return
-
-    try:
-        detected_lang = detect(content)
-    except:
-        detected_lang = "auto"
-
-    # Target lang auto-switch
-    target_lang = "en" if detected_lang != "en" else "bn"
-
-    # Translation logic
-    lines = content.splitlines()
-    translated_lines = []
-    for line in lines:
-        if line.strip().isdigit() or "-->" in line or not line.strip():
-            translated_lines.append(line)
+    # Translate each line
+    for i, line in enumerate(original):
+        if '-->' in line or line.strip().isdigit() or line.strip() == "":
+            translated.append(line)
         else:
             try:
-                translated = GoogleTranslator(source='auto', target=target_lang).translate(line)
-                translated_lines.append(translated)
+                translated_text = GoogleTranslator(source='auto', target=lang_code).translate(line.strip())
+                translated.append(translated_text + "\n")
             except Exception:
-                translated_lines.append(line)
+                translated.append(line)
 
-    translated_text = "\n".join(translated_lines)
-    output_path = f"temp/translated_{filename}"
+        if i % 10 == 0 or i == total - 1:
+            percent = int((i / total) * 100)
+            await progress_msg.edit_text(f"Progress: {percent}% ({i}/{total})")
 
-    async with aiofiles.open(output_path, mode="w", encoding="utf-8") as f:
-        await f.write(translated_text)
+    # Save translated file
+    output_path = f"temp/{uuid.uuid4()}_translated{user['ext']}"
+    async with aiofiles.open(output_path, "w", encoding="utf-8") as f:
+        await f.writelines(translated)
 
-    await update.message.reply_document(
+    # Send File
+    await context.bot.send_document(
+        chat_id=chat_id,
         document=InputFile(output_path),
-        filename=f"translated_{filename}",
-        caption=f"Translated from `{detected_lang}` to `{target_lang}`"
+        filename=f"Translated_{user['name']}",
+        caption=f"Translation done to {LANGUAGES[lang_code]}"
     )
 
     # Cleanup
-    os.remove(file_path)
+    os.remove(user["file"])
     os.remove(output_path)
+    del user_data[chat_id]
 
-# Bot Runner
+# App Start
 def main():
-    app_tg = ApplicationBuilder().token(TOKEN).build()
-    app_tg.add_handler(CommandHandler("start", start))
-    app_tg.add_handler(MessageHandler(filters.Document.ALL, handle_subtitle))
-
-    threading.Thread(target=start_flask).start()
-    app_tg.run_polling()
+    token = os.getenv("BOT_TOKEN")
+    app = ApplicationBuilder().token(token).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    app.add_handler(CallbackQueryHandler(handle_language))
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
